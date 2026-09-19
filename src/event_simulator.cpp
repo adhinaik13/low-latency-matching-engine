@@ -2,126 +2,216 @@
 #include "MatchingEngine.hpp"
 #include "SPSCQueue.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <thread>
+#include <vector>
 
 using namespace hft;
 
-int main() {
+int main(int argc, char* argv[]) {
     constexpr std::size_t QueueCapacity = 1024;
-    constexpr std::uint64_t EventCount = 1'000'000;
 
-    SPSCQueue<MarketEvent, QueueCapacity> queue;
+    std::uint64_t event_count = 1'000'000;
+    int run_count = 5;
 
-    std::atomic<bool> producer_done{false};
-    std::atomic<std::uint64_t> processed_events{0};
-    std::atomic<std::uint64_t> generated_trades{0};
+    if (argc >= 2) {
+        event_count = std::stoull(argv[1]);
+    }
 
-    const auto start = std::chrono::steady_clock::now();
+    if (argc >= 3) {
+        run_count = std::stoi(argv[2]);
+    }
 
-    std::thread producer([&]() {
-        for (std::uint64_t i = 1; i <= EventCount; ++i) {
+    if (event_count == 0 || run_count <= 0) {
+        std::cerr << "Usage: event_simulator.exe [events] [runs]\n";
+        return 1;
+    }
+
+    std::vector<double> throughputs;
+    throughputs.reserve(run_count);
+
+    for (int run = 1; run <= run_count; ++run) {
+        SPSCQueue<MarketEvent, QueueCapacity> queue;
+
+        std::atomic<bool> start_flag{false};
+        std::atomic<bool> producer_done{false};
+
+        std::atomic<std::uint64_t> processed_events{0};
+        std::atomic<std::uint64_t> generated_trades{0};
+
+        std::thread producer([&]() {
+            while (!start_flag.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+
+            for (std::uint64_t i = 1; i <= event_count; ++i) {
+                MarketEvent event;
+
+                event.type = EventType::NewOrder;
+                event.order_id = i;
+                event.side = (i % 2 == 0) ? Side::Buy : Side::Sell;
+                event.price = 10000;
+                event.quantity = 1;
+
+                while (!queue.push(event)) {
+                    std::this_thread::yield();
+                }
+            }
+
+            producer_done.store(true, std::memory_order_release);
+        });
+
+        std::thread consumer([&]() {
+            MatchingEngine engine;
             MarketEvent event;
 
-            event.type = EventType::NewOrder;
-            event.order_id = i;
-            event.side = (i % 2 == 0) ? Side::Buy : Side::Sell;
-            event.price = 10000;
-            event.quantity = 1;
-
-            while (!queue.push(event)) {
+            while (!start_flag.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
-        }
 
-        producer_done.store(true, std::memory_order_release);
-    });
+            while (true) {
+                if (queue.pop(event)) {
+                    if (event.type == EventType::NewOrder) {
+                        auto trades = engine.submitLimitOrder(
+                            event.order_id,
+                            event.side,
+                            event.price,
+                            event.quantity
+                        );
 
-    std::thread consumer([&]() {
-        MatchingEngine engine;
+                        generated_trades.fetch_add(
+                            trades.size(),
+                            std::memory_order_relaxed
+                        );
+                    } else if (event.type == EventType::CancelOrder) {
+                        engine.cancel(event.order_id);
+                    }
 
-        MarketEvent event;
-
-        while (true) {
-            if (queue.pop(event)) {
-                if (event.type == EventType::NewOrder) {
-                    auto trades = engine.submitLimitOrder(
-                        event.order_id,
-                        event.side,
-                        event.price,
-                        event.quantity
-                    );
-
-                    generated_trades.fetch_add(
-                        trades.size(),
+                    processed_events.fetch_add(
+                        1,
                         std::memory_order_relaxed
                     );
-                } else if (event.type == EventType::CancelOrder) {
-                    engine.cancel(event.order_id);
+                } else if (producer_done.load(
+                               std::memory_order_acquire)) {
+                    break;
+                } else {
+                    std::this_thread::yield();
                 }
-
-                processed_events.fetch_add(
-                    1,
-                    std::memory_order_relaxed
-                );
-            } else if (producer_done.load(std::memory_order_acquire)) {
-                break;
-            } else {
-                std::this_thread::yield();
             }
+        });
+
+        // Both worker threads have been created before timing begins.
+        const auto start = std::chrono::steady_clock::now();
+
+        start_flag.store(true, std::memory_order_release);
+
+        producer.join();
+        consumer.join();
+
+        const auto end = std::chrono::steady_clock::now();
+
+        const auto elapsed_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                end - start
+            ).count();
+
+        const double elapsed_seconds =
+            static_cast<double>(elapsed_ns) / 1'000'000'000.0;
+
+        const double throughput =
+            static_cast<double>(event_count) / elapsed_seconds;
+
+        const double average_ns_per_event =
+            static_cast<double>(elapsed_ns) /
+            static_cast<double>(event_count);
+
+        const auto processed = processed_events.load();
+        const auto trades = generated_trades.load();
+
+        if (processed != event_count) {
+            std::cerr << "ERROR: run " << run
+                      << " processed only "
+                      << processed << " events.\n";
+            return 1;
         }
-    });
 
-    producer.join();
-    consumer.join();
+        const std::uint64_t expected_trades = event_count / 2;
 
-    const auto end = std::chrono::steady_clock::now();
+        if (trades != expected_trades) {
+            std::cerr << "ERROR: run " << run
+                      << " generated unexpected trade count: "
+                      << trades << '\n';
+            return 1;
+        }
 
-    const auto elapsed_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            end - start
-        ).count();
+        throughputs.push_back(throughput);
 
-    const double elapsed_seconds =
-        static_cast<double>(elapsed_ns) / 1'000'000'000.0;
-
-    const double events_per_second =
-        static_cast<double>(EventCount) / elapsed_seconds;
-
-    const double average_ns_per_event =
-        static_cast<double>(elapsed_ns) /
-        static_cast<double>(EventCount);
-
-    const auto processed = processed_events.load();
-    const auto trades = generated_trades.load();
-
-    std::cout << "Events generated:  " << EventCount << '\n';
-    std::cout << "Events processed: " << processed << '\n';
-    std::cout << "Trades generated: " << trades << '\n';
-
-    std::cout << std::fixed << std::setprecision(2);
-    std::cout << "Elapsed time:      "
-              << elapsed_seconds << " s\n";
-    std::cout << "Throughput:        "
-              << events_per_second << " events/sec\n";
-    std::cout << "Average/event:     "
-              << average_ns_per_event << " ns\n";
-
-    if (processed != EventCount) {
-        std::cerr << "ERROR: not all events were processed.\n";
-        return 1;
+        std::cout << "Run " << run
+                  << ": throughput = "
+                  << std::fixed << std::setprecision(2)
+                  << throughput
+                  << " events/sec, average = "
+                  << average_ns_per_event
+                  << " ns/event\n";
     }
 
-    if (trades != EventCount / 2) {
-        std::cerr << "ERROR: unexpected trade count.\n";
-        return 1;
+    std::sort(throughputs.begin(), throughputs.end());
+
+    const double sum =
+        std::accumulate(throughputs.begin(), throughputs.end(), 0.0);
+
+    const double average =
+        sum / static_cast<double>(throughputs.size());
+
+    const double median =
+        (throughputs.size() % 2 == 0)
+            ? (throughputs[throughputs.size() / 2 - 1] +
+               throughputs[throughputs.size() / 2]) / 2.0
+            : throughputs[throughputs.size() / 2];
+
+    double squared_diff_sum = 0.0;
+
+    for (double throughput : throughputs) {
+        const double diff = throughput - average;
+        squared_diff_sum += diff * diff;
     }
 
-    std::cout << "Event pipeline completed successfully.\n";
+    const double standard_deviation =
+        std::sqrt(
+            squared_diff_sum /
+            static_cast<double>(throughputs.size())
+        );
+
+    const double coefficient_of_variation =
+        average > 0.0
+            ? (standard_deviation / average) * 100.0
+            : 0.0;
+
+    std::cout << "\nSummary\n";
+    std::cout << "-------\n";
+    std::cout << "Events/run:       " << event_count << '\n';
+    std::cout << "Runs:             " << run_count << '\n';
+    std::cout << "Minimum:          " << throughputs.front()
+              << " events/sec\n";
+    std::cout << "Maximum:          " << throughputs.back()
+              << " events/sec\n";
+    std::cout << "Average:          " << average
+              << " events/sec\n";
+    std::cout << "Median:           " << median
+              << " events/sec\n";
+    std::cout << "Std dev:          " << standard_deviation
+              << " events/sec\n";
+    std::cout << "CV:               " << coefficient_of_variation
+              << "%\n";
+
+    std::cout << "\nEvent pipeline completed successfully.\n";
 
     return 0;
 }
