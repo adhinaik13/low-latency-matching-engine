@@ -1,7 +1,10 @@
 #include "MatchingEngine.hpp"
+#include "SPSCQueue.hpp"
 
+#include <atomic>
 #include <cassert>
 #include <iostream>
+#include <thread>
 
 using namespace hft;
 
@@ -70,12 +73,96 @@ void test_cancel() {
     assert(e.book().find(1) == nullptr);
 }
 
+void test_spsc_queue() {
+    SPSCQueue<int, 4> queue;
+
+    assert(queue.empty());
+    assert(!queue.full());
+
+    // Capacity 4 uses one slot as a sentinel,
+    // so 3 elements can be stored at once.
+    assert(queue.push(10));
+    assert(queue.push(20));
+    assert(queue.push(30));
+
+    assert(queue.full());
+    assert(!queue.push(40));
+
+    int value = 0;
+
+    assert(queue.pop(value));
+    assert(value == 10);
+
+    assert(queue.pop(value));
+    assert(value == 20);
+
+    assert(queue.pop(value));
+    assert(value == 30);
+
+    assert(queue.empty());
+    assert(!queue.pop(value));
+
+    // Verify that the queue can be reused after becoming empty.
+    assert(queue.push(40));
+    assert(queue.pop(value));
+    assert(value == 40);
+}
+
+void test_spsc_concurrent() {
+    constexpr std::size_t queue_capacity = 1024;
+    constexpr int total_items = 1'000'000;
+
+    SPSCQueue<int, queue_capacity> queue;
+
+    std::atomic<bool> producer_done{false};
+    std::atomic<bool> test_failed{false};
+
+    std::thread producer([&]() {
+        for (int i = 0; i < total_items; ++i) {
+            while (!queue.push(i)) {
+                std::this_thread::yield();
+            }
+        }
+
+        producer_done.store(true, std::memory_order_release);
+    });
+
+    std::thread consumer([&]() {
+        int expected = 0;
+        int value = 0;
+
+        while (expected < total_items) {
+            if (queue.pop(value)) {
+                if (value != expected) {
+                    test_failed.store(true, std::memory_order_release);
+                    return;
+                }
+
+                ++expected;
+            } else if (producer_done.load(std::memory_order_acquire)) {
+                test_failed.store(true, std::memory_order_release);
+                return;
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
+
+    producer.join();
+    consumer.join();
+
+    assert(!test_failed.load(std::memory_order_acquire));
+    assert(queue.empty());
+}
+
 int main() {
     test_full_match();
     test_partial_match();
     test_price_time_priority();
     test_no_cross();
     test_cancel();
+    test_spsc_queue();
+    test_spsc_concurrent();
 
     std::cout << "All tests passed.\n";
     return 0;
