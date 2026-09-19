@@ -19,7 +19,7 @@ target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if (MSVC)
     target_compile_options(engine PRIVATE /W4)
 else()
-    target_compile_options(engine PRIVATE -Wall -Wextra -Wpedantic -O2)
+    target_compile_options(engine PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 add_executable(exchange_demo src/main.cpp)
