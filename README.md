@@ -1,7 +1,7 @@
 # Low-Latency Limit Order Book & Matching Engine
 
 A C++20 educational trading-engine project designed around HFT-style order
-matching and low-latency systems concepts.
+matching, deterministic execution, concurrency, and low-latency systems concepts.
 
 ## Features
 
@@ -14,28 +14,37 @@ matching and low-latency systems concepts.
 - Fixed-point integer prices
 - Reusable order object pool
 - Unit tests
-- Simple throughput benchmark
+- Bounded lock-free SPSC queue
+- Producer/consumer market-event pipeline
+- Multi-run throughput benchmark
 - CMake build
 
 ## Architecture
 
 ```text
-Order Generator
-      |
-      v
-MatchingEngine
-      |
-      +----> Bid Book
-      |
-      +----> Ask Book
-      |
-      v
-   Trades
+Market Event Producer
+        |
+        v
+   SPSC Queue
+        |
+        v
+Market Event Consumer
+        |
+        v
+  MatchingEngine
+        |
+        +----> Bid Book
+        |
+        +----> Ask Book
+        |
+        v
+      Trades
 ```
 
-The matching engine is intentionally single-threaded. This is a useful starting
-point for studying deterministic matching and latency before introducing
-concurrency.
+The matching engine itself is intentionally single-threaded. A bounded
+single-producer/single-consumer queue connects the simulated market-event
+producer and consumer. This separates the event transport path from the
+deterministic matching logic while keeping the core engine simple.
 
 ## Build
 
@@ -65,14 +74,50 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+The test suite covers matching behavior, partial fills, cancellation,
+order-book operations, the SPSC queue, and concurrent producer/consumer
+correctness.
+
 ## Run benchmark
+
+### Matching engine benchmark
 
 ```bash
 ./build/engine_benchmark
 ```
 
-Run the benchmark in `Release` mode. Results depend heavily on CPU, compiler,
-OS, background load, and machine configuration.
+This benchmark measures aggregate order-processing throughput for the matching
+engine.
+
+### Event pipeline benchmark
+
+```bash
+./build/event_simulator
+```
+
+The event simulator accepts optional event-count and run-count arguments:
+
+```bash
+./build/event_simulator 5000000 5
+```
+
+The benchmark measures the wall-clock time for a producer/consumer pipeline
+that generates market events, transfers them through the bounded SPSC queue,
+and processes them through the matching engine.
+
+For one measured Windows/MSYS2 Release environment, 5 million events per run
+across 5 runs produced:
+
+- Median throughput: approximately 4.14 million events/sec
+- Average throughput: approximately 4.14 million events/sec
+- Minimum throughput: approximately 4.05 million events/sec
+- Maximum throughput: approximately 4.19 million events/sec
+- Coefficient of variation: 1.18%
+
+These results are environment-dependent and can vary with CPU, compiler,
+operating system, background load, and machine configuration. The throughput
+figure is an aggregate pipeline measurement, not a per-order latency
+distribution or a p50/p95/p99 latency measurement.
 
 ## Design notes
 
@@ -102,36 +147,41 @@ IDs can be located without scanning every price level.
 Orders are allocated from a reusable pool. This reduces repeated allocation
 and deallocation during order processing.
 
+### SPSC queue
+
+The event pipeline uses a bounded single-producer/single-consumer ring
+buffer implemented with atomic head and tail indices. The queue avoids mutexes
+and dynamic allocation in its push/pop operations.
+
 ### Important limitation
 
-This is a learning project, not production exchange infrastructure. It does
+This is a learning project, not production exchange infrastructure.It does
 not implement production-grade networking, persistence, risk controls,
 sequence recovery, market-data protocols, hardware timestamping, NUMA
-placement, kernel bypass, or a production lock-free queue.
+placement, or kernel bypass.
 
-## Suggested next improvements
+## Future improvements
 
-1. Add per-order latency measurement and p50/p95/p99 reporting.
-2. Add order modification.
-3. Add market orders.
-4. Add a deterministic replay engine for historical order-flow data.
-5. Add a producer/consumer market-data simulator.
-6. Benchmark alternative data structures.
-7. Profile with Linux `perf`.
-8. Add sanitizers and static analysis.
-9. Add a CSV trade/order log.
-10. Compare allocation strategies.
+1. Add order modification.
+2. Add market orders.
+3. Add a deterministic replay engine for historical order-flow data.
+4. Benchmark alternative data structures.
+5. Add sanitizers and static analysis.
+6. Add a CSV trade/order log.
+7. Compare additional allocation strategies.
+8. Profile on Linux using `perf`.
 
 ## Resume direction
 
-After implementing and benchmarking the project yourself, it can support bullets
-such as:
+After implementing and benchmarking the project yourself, it can support
+bullets such as:
 
 - Developed a C++20 limit-order matching engine implementing price-time
   priority, partial fills, and order cancellation.
-- Designed an in-memory bid/ask order book with hash-based order-ID lookup and
-  a reusable object pool to reduce allocation overhead.
-- Built a benchmark harness to measure order-processing throughput and latency
-  under simulated order flow.
+- Designed an in-memory bid/ask order book with hash-based order-ID lookup,
+  fixed-point pricing, and a reusable object pool.
+- Implemented a bounded lock-free SPSC event pipeline and benchmarked 5 million
+  events per run across 5 runs at a median throughput of approximately
+  4.14 million events/sec on a Windows/MSYS2 Release environment.
 
 Only report benchmark numbers that you actually measure and reproduce.
