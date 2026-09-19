@@ -159,29 +159,3 @@ This is a learning project, not production exchange infrastructure.It does
 not implement production-grade networking, persistence, risk controls,
 sequence recovery, market-data protocols, hardware timestamping, NUMA
 placement, or kernel bypass.
-
-## Future improvements
-
-1. Add order modification.
-2. Add market orders.
-3. Add a deterministic replay engine for historical order-flow data.
-4. Benchmark alternative data structures.
-5. Add sanitizers and static analysis.
-6. Add a CSV trade/order log.
-7. Compare additional allocation strategies.
-8. Profile on Linux using `perf`.
-
-## Resume direction
-
-After implementing and benchmarking the project yourself, it can support
-bullets such as:
-
-- Developed a C++20 limit-order matching engine implementing price-time
-  priority, partial fills, and order cancellation.
-- Designed an in-memory bid/ask order book with hash-based order-ID lookup,
-  fixed-point pricing, and a reusable object pool.
-- Implemented a bounded lock-free SPSC event pipeline and benchmarked 5 million
-  events per run across 5 runs at a median throughput of approximately
-  4.14 million events/sec on a Windows/MSYS2 Release environment.
-
-Only report benchmark numbers that you actually measure and reproduce.
