@@ -35,4 +35,10 @@ endif()
 if (BUILD_BENCHMARKS)
     add_executable(engine_benchmark benchmarks/benchmark.cpp)
     target_link_libraries(engine_benchmark PRIVATE engine)
+
+add_executable(event_simulator
+    src/event_simulator.cpp
+)
+
+target_link_libraries(event_simulator PRIVATE engine)
 endif()
